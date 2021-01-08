@@ -1,8 +1,64 @@
 #include "firmware.h"
+#include "keygen.h"
 #include <mem/minerva.h>
 
 extern hekate_config h_cfg;
 extern emummc_cfg_t emu_cfg;
+
+bool customSecmon = false;
+bool customWb = false;
+bool customKernel = false;
+
+bool hasCustomWb(launch_ctxt_t *ctxt)
+{
+    if (customWb)
+        return customWb;
+    if (fopen("/ReiNX/warmboot.bin", "rb") != 0)
+    {
+        customWb = true;
+        ctxt->warmboot = sd_file_read("/ReiNX/warmboot.bin", &ctxt->warmboot_size);
+        fclose();
+    }
+    if (fopen("/ReiNX/lp0fw.bin", "rb") != 0)
+    {
+        customWb = true;
+        ctxt->warmboot = sd_file_read("/ReiNX/lp0fw.bin", &ctxt->warmboot_size);
+        fclose();
+    }
+    return customWb;
+}
+
+bool hasCustomSecmon(launch_ctxt_t *ctxt)
+{
+    if (customSecmon)
+        return customSecmon;
+    if (fopen("/ReiNX/secmon.bin", "rb") != 0)
+    {
+        customSecmon = true;
+        ctxt->secmon = sd_file_read("/ReiNX/secmon.bin", &ctxt->secmon_size);
+        fclose();
+    }
+    if (fopen("/ReiNX/exosphere.bin", "rb") != 0)
+    {
+        customSecmon = true;
+        ctxt->secmon = sd_file_read("/ReiNX/exosphere.bin", &ctxt->secmon_size);
+        fclose();
+    }
+    return customSecmon;
+}
+
+bool hasCustomKern(launch_ctxt_t *ctxt)
+{
+    if (customKernel)
+        return customKernel;
+    if (fopen("/ReiNX/kernel.bin", "rb") != 0)
+    {
+        customKernel = true;
+        ctxt->kernel = sd_file_read("/ReiNX/kernel.bin", &ctxt->kernel_size);
+        fclose();
+    }
+    return customKernel;
+}
 
 u8 *LoadPackage1(launch_ctxt_t *ctxt)
 {
@@ -36,19 +92,18 @@ u8 *LoadPackage1(launch_ctxt_t *ctxt)
 
 int loadFirm()
 {
-    u8 kb;
     u8 hos;
-	u32 secmon_base;
-	u32 warmboot_base;
-	launch_ctxt_t ctxt;
-	bool exo_new = false;
-	/*tsec_ctxt_t tsec_ctxt;
-	volatile secmon_mailbox_t *secmon_mailbox;*/
+    u32 secmon_base;
+    u32 warmboot_base;
+    launch_ctxt_t ctxt;
+    bool exo_new = false;
+    tsec_ctxt_t tsec_ctxt;
+    /*volatile secmon_mailbox_t *secmon_mailbox;*/
 
-	minerva_change_freq(FREQ_1600);
-	memset(&ctxt, 0, sizeof(launch_ctxt_t));
-	//memset(&tsec_ctxt, 0, sizeof(tsec_ctxt_t));
-	list_init(&ctxt.kip1_list);
+    minerva_change_freq(FREQ_1600);
+    memset(&ctxt, 0, sizeof(launch_ctxt_t));
+    memset(&tsec_ctxt, 0, sizeof(tsec_ctxt_t));
+    list_init(&ctxt.kip1_list);
 
     print("%k\nSetting up HOS:\n%k", WHITE, ORANGE);
 
@@ -56,9 +111,12 @@ int loadFirm()
     int res = emummc_storage_init_mmc(&emmc_storage, &emmc_sdmmc);
     if (res)
     {
-        if (res == 2){
+        if (res == 2)
+        {
             print("%k Failed init eMMC.\n", RED);
-        } else {
+        }
+        else
+        {
             print("%k Failed init emuMMC.\n", RED);
         }
 
@@ -67,12 +125,70 @@ int loadFirm()
 
     // Read boot0 and parse Package1
     LoadPackage1(&ctxt);
+    if (!hasCustomSecmon(&ctxt) || !hasCustomWb(&ctxt)){
+        print("%kMissing warmboot.bin or secmon.bin. These are required!\n", RED);
+        return 1;
+    }
     print("Firmware kb: %d\n", ctxt.pkg1_id->kb);
     print("Firmware ver: %d\n", ctxt.pkg1_id->hos);
+    print("Decrypting Package1...\n");
+    bool emummc_enabled = emu_cfg.enabled;
 
-    // Generate 
-    if(!keygen())
-        print("Failed to keygen...\n");
+    // Enable emummc patching.
+    if (emummc_enabled)
+    {
+        print("Enable emummc patching.");
+        //config_kip1patch(&ctxt, "emummc");
+    }
+
+    // Check if secmon is new exosphere.
+    if (ctxt.secmon)
+        exo_new = !memcmp((void *)((u8 *)ctxt.secmon + ctxt.secmon_size - 4), "LENY", 4);
+    const pk11_offs *pk1_latest = pkg1_get_latest();
+    secmon_base = exo_new ? pk1_latest->secmon_base : ctxt.pkg1_id->secmon_base;
+    warmboot_base = exo_new ? pk1_latest->warmboot_base : ctxt.pkg1_id->warmboot_base;
+    h_cfg.aes_slots_new = exo_new;
+
+    // Generate keys
+    if (ctxt.pkg1_id->kb < KB_FIRMWARE_VERSION_700)
+    {
+        if (!keygen(ctxt.keyblob, ctxt.pkg1_id->kb, &tsec_ctxt, &ctxt))
+            print("%kFailed to keygen...\n", RED);
+    }
+    else
+    {
+        if (!has_keygen_ran())
+        {
+            reboot_to_sept(ctxt.pkg1 + ctxt.pkg1_id->tsec_off, ctxt.pkg1_id->hos);
+        }
+        else
+        {
+            // Generate keys.
+            if (!h_cfg.se_keygen_done)
+            {
+                tsec_ctxt.fw = (u8 *)ctxt.pkg1 + ctxt.pkg1_id->tsec_off;
+                tsec_ctxt.pkg1 = ctxt.pkg1;
+                tsec_ctxt.pkg11_off = ctxt.pkg1_id->pkg11_off;
+                tsec_ctxt.secmon_base = secmon_base;
+
+                if (ctxt.pkg1_id->kb >= KB_FIRMWARE_VERSION_700 && !h_cfg.sept_run)
+                {
+                    print("%kFailed to run sept", RED);
+                    return 1;
+                }
+
+                if (!keygen(ctxt.keyblob, ctxt.pkg1_id->kb, &tsec_ctxt, &ctxt))
+                {
+                    print("%kFailed to keygen...\n", RED);
+                }
+                if (ctxt.pkg1_id->kb <= KB_FIRMWARE_VERSION_600)
+                    h_cfg.se_keygen_done = 1;
+            }
+        }
+    }
+
+    print("Unpacking pkg1\n");
+
     return 0;
 }
 
@@ -82,6 +198,10 @@ void firmware()
     if (loadFirm() == 0)
     {
         print("%kFirmware loaded.\n", GREEN);
+    }
+    else
+    {
+        print("%kFailed to load the firmware...\n", RED);
     }
     btn_wait();
 }

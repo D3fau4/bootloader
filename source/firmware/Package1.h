@@ -70,3 +70,5 @@ static const pk11_offs _pk11_offs[] = {
 };
 
 const pk11_offs *pkg1_identify(u8 *pkg1);
+void pkg1_unpack();
+const pk11_offs *pkg1_get_latest();

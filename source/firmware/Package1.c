@@ -14,3 +14,12 @@ const pk11_offs *pkg1_identify(u8 *pkg1)
             return &_pk11_offs[i];
     return NULL;
 }
+
+const pk11_offs *pkg1_get_latest()
+{
+	return &_pk11_offs[ARRAY_SIZE(_pk11_offs) - 2];
+}
+
+void pkg1_unpack(){
+    //return 0;
+}
