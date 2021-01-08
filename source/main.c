@@ -201,11 +201,8 @@ void ipl_main()
 	emu_cfg.enabled = !h_cfg.emummc_force_disable;
 
 	display_backlight_brightness(100, 1000);
-	firmware();
-
-	/* Bucle para mostrar le menú
 	while (true)
-		tui_do_menu(&menu_top);*/
+		firmware();
 
 	// Halt BPMP if we managed to get out of execution.
 	while (true)
